@@ -53,6 +53,12 @@ build = [
     "torchtyping == 0.1.4",
 ]
 
+[dependency-groups]
+dev = [
+    "femr[build]",
+    "pre-commit",
+]
+
 [tool.isort]
 multi_line_output = 3
 include_trailing_comma = true
