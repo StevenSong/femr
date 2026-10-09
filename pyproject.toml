@@ -73,3 +73,7 @@ match = "src/.*\\.py"
 pythonpath = [
     "tests"
 ]
+
+[tool.uv]
+# xformers has no macOS wheels, so only resolve the lockfile for Linux.
+environments = ["sys_platform == 'linux'"]
