@@ -84,3 +84,9 @@ pythonpath = [
 [tool.uv]
 # xformers has no macOS wheels, so only resolve the lockfile for Linux.
 environments = ["sys_platform == 'linux'"]
+# xformers wheels only load their CUDA extensions with the exact torch they were built against
+# (xformers 0.0.35 <-> torch 2.10.0+cu128); its metadata doesn't enforce this.
+constraint-dependencies = [
+    "torch==2.10.0; python_version >= '3.10'",
+    "xformers==0.0.35; python_version >= '3.10'",
+]
