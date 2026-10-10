@@ -111,6 +111,7 @@ def main() -> None:
     parser.add_argument("meds_dataset", help="MEDS 0.3 dataset root, the directory containing data/")
     parser.add_argument("output", help="Directory to create; patients are written to output/data/")
     parser.add_argument("--no-training-transforms", action="store_true", help="Skip the Stanford post-ETL steps")
+    parser.add_argument("--patients-per-row-group", type=int, default=1000)
     args = parser.parse_args()
 
     data_dir = os.path.join(args.meds_dataset, "data")
@@ -132,7 +133,11 @@ def main() -> None:
         assert seen_patients.isdisjoint(ids), "Some patients span more than one input file"
         seen_patients |= ids
 
-        pq.write_table(patients.to_arrow().cast(schema), os.path.join(args.output, "data", f"{i:05d}.parquet"))
+        # meds 0.1.3 uses 32-bit offsets, so cast in slices to keep e.g. note text under 2 GB per chunk
+        table = patients.to_arrow()
+        with pq.ParquetWriter(os.path.join(args.output, "data", f"{i:05d}.parquet"), schema) as writer:
+            for start in range(0, table.num_rows, args.patients_per_row_group):
+                writer.write_table(table.slice(start, args.patients_per_row_group).cast(schema))
 
     print(f"{len(files)} files converted into {os.path.join(args.output, 'data')}")
     width = max(map(len, totals))

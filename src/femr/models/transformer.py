@@ -320,6 +320,19 @@ class FEMRModel(transformers.PreTrainedModel):
             return loss, result
 
 
+def to_device(data: Any, device: torch.device) -> Any:
+    if isinstance(data, collections.abc.Mapping):
+        return {k: to_device(v, device) for k, v in data.items()}
+    elif isinstance(data, torch.Tensor):
+        return data.to(device, non_blocking=True)
+    elif isinstance(data, np.ndarray):
+        return data
+    elif isinstance(data, (int, float, np.number, np.bool_)):
+        return data
+    else:
+        raise RuntimeError("Could not move item of type " + str(type(data)))
+
+
 def compute_features(
     dataset: datasets.Dataset,
     model_path: str,
@@ -346,7 +359,8 @@ def compute_features(
         filtered_data, tokens_per_batch=tokens_per_batch, min_patients_per_batch=1, num_proc=num_proc
     )
 
-    batches.set_format("pt", device=device)
+    # Keep batches on the CPU until collated, as collate converts some tensors to numpy
+    batches.set_format("pt")
 
     all_patient_ids = []
     all_feature_times = []
@@ -354,6 +368,8 @@ def compute_features(
 
     for batch in batches:
         batch = processor.collate([batch])["batch"]
+        if device:
+            batch = to_device(batch, device)
         with torch.no_grad():
             _, result = model(batch, return_reprs=True)
             all_patient_ids.append(result["patient_ids"].cpu().numpy())
