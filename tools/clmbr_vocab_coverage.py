@@ -3,6 +3,8 @@
 femr 0.2.3 silently drops measurements its flat tokenizer can't map to a token (see FEMRTokenizer.get_feature_codes),
 so low coverage means the model sees little of each patient's record, without any error.
 
+Works on MEDS 0.3 datasets and on the MEDS 0.1.3 output of tools/meds_to_femr023.py.
+
 Usage: python tools/clmbr_vocab_coverage.py PATH_TO_MEDS_DATASET [--max-files N]
 """
 
@@ -15,6 +17,9 @@ import polars as pl
 
 def classify(lf: pl.LazyFrame, code_lookup, numeric_lookup, string_lookup) -> pl.LazyFrame:
     """Returns (code, kind, covered) per measurement, mirroring flat FEMRTokenizer.get_feature_codes."""
+    if "events" in lf.collect_schema().names():
+        # One row per patient (MEDS 0.1.3, e.g. from tools/meds_to_femr023.py), so flatten to one row per measurement
+        lf = lf.select(pl.col("events").explode().struct.field("measurements").explode().struct.unnest())
     if "text_value" not in lf.collect_schema().names():
         lf = lf.with_columns(pl.lit(None, dtype=pl.String).alias("text_value"))
     lf = lf.select(
