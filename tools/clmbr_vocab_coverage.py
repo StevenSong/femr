@@ -16,14 +16,23 @@ import polars as pl
 
 
 def classify(lf: pl.LazyFrame, code_lookup, numeric_lookup, string_lookup) -> pl.LazyFrame:
-    """Returns (code, kind, covered) per measurement, mirroring flat FEMRTokenizer.get_feature_codes."""
+    """Returns (subject_id, code, kind, covered) per measurement, mirroring flat FEMRTokenizer.get_feature_codes."""
     if "events" in lf.collect_schema().names():
         # One row per patient (MEDS 0.1.3, e.g. from tools/meds_to_femr023.py), so flatten to one row per measurement
-        lf = lf.select(pl.col("events").explode().struct.field("measurements").explode().struct.unnest())
+        lf = (
+            lf.select(pl.col("patient_id").alias("subject_id"), "events")
+            .explode("events")
+            .select("subject_id", pl.col("events").struct.field("measurements"))
+            .explode("measurements")
+            .select("subject_id", pl.col("measurements").struct.unnest())
+        )
     if "text_value" not in lf.collect_schema().names():
         lf = lf.with_columns(pl.lit(None, dtype=pl.String).alias("text_value"))
     lf = lf.select(
-        pl.col("code").cast(pl.String), pl.col("numeric_value").cast(pl.Float64), pl.col("text_value").cast(pl.String)
+        "subject_id",
+        pl.col("code").cast(pl.String),
+        pl.col("numeric_value").cast(pl.Float64),
+        pl.col("text_value").cast(pl.String),
     ).with_row_index("row")
 
     codes = pl.LazyFrame({"code": list(code_lookup)}, schema={"code": pl.String})
@@ -54,7 +63,58 @@ def classify(lf: pl.LazyFrame, code_lookup, numeric_lookup, string_lookup) -> pl
     plain = lf.filter(pl.col("numeric_value").is_null() & pl.col("text_value").is_null())
     plain = plain.join(codes.with_columns(covered), on="code", how="left").with_columns(kind=pl.lit("code"))
 
-    return pl.concat([f.select("code", "kind", pl.col("covered").fill_null(False)) for f in (numeric, text, plain)])
+    return pl.concat(
+        [f.select("subject_id", "code", "kind", pl.col("covered").fill_null(False)) for f in (numeric, text, plain)]
+    )
+
+
+def per_patient(measurements: pl.LazyFrame) -> pl.LazyFrame:
+    """Returns (rows, unmapped, coverage overall and per kind) per patient."""
+    return measurements.group_by("subject_id").agg(
+        pl.len().alias("rows"),
+        (~pl.col("covered")).sum().alias("unmapped"),
+        pl.col("covered").mean().alias("all"),
+        *[pl.col("covered").filter(pl.col("kind") == kind).mean().alias(kind) for kind in ("code", "numeric")],
+    )
+
+
+def per_patient_summary(patients: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, tuple[float, float]]:
+    """Returns (coverage quantiles, patients below thresholds, coverage by record length, concentration).
+
+    Concentration is the share of all unmapped measurements, and of all measurements, held by the 10% of patients with
+    the most unmapped measurements."""
+    quantiles = [0.05, 0.25, 0.5, 0.75, 0.95]
+    by_quantile = pl.DataFrame(
+        {"kind": ["all", "code", "numeric"]}
+        | {f"p{q * 100:g}": [patients[kind].quantile(q) for kind in ("all", "code", "numeric")] for q in quantiles}
+    )
+    below = pl.DataFrame(
+        {
+            "patient coverage": [f"< {t:.0%}" for t in (0.75, 0.5, 0.25)] + ["no mapped measurements"],
+            "patients": [(patients["all"] < t).sum() for t in (0.75, 0.5, 0.25)] + [(patients["all"] == 0).sum()],
+        }
+    ).with_columns((pl.col("patients") / len(patients)).alias("share"))
+
+    # Rank-based quartiles, as qcut fails when many patients share a record length
+    quartile = (pl.col("rows").rank("ordinal") - 1) * 4 // pl.len() + 1
+    by_length = (
+        patients.with_columns(quartile.alias("record length quartile"))
+        .group_by("record length quartile")
+        .agg(
+            pl.len().alias("patients"),
+            pl.col("rows").median().alias("median measurements"),
+            pl.col("all").median().alias("median patient coverage"),
+            (1 - pl.col("unmapped").sum() / pl.col("rows").sum()).alias("pooled coverage"),
+        )
+        .sort("record length quartile")
+    )
+
+    top = patients.sort("unmapped", descending=True).head(max(1, len(patients) // 10))
+    concentration = (
+        top["unmapped"].sum() / max(1, patients["unmapped"].sum()),
+        top["rows"].sum() / patients["rows"].sum(),
+    )
+    return by_quantile, below, by_length, concentration
 
 
 def main() -> None:
@@ -78,7 +138,7 @@ def main() -> None:
     )
     prefix = pl.col("code").str.split("/").list.first()
     coverage = [pl.len().alias("rows"), pl.col("covered").mean().alias("covered")]
-    by_kind, by_vocabulary, uncovered = pl.collect_all(
+    by_kind, by_vocabulary, uncovered, patients = pl.collect_all(
         [
             measurements.group_by("kind").agg(coverage).sort("rows", descending=True),
             measurements.group_by(prefix.alias("vocabulary")).agg(coverage).sort("rows", descending=True).head(30),
@@ -87,6 +147,7 @@ def main() -> None:
             .len()
             .sort("len", descending=True)
             .head(30),
+            per_patient(measurements),
         ]
     )
 
@@ -108,6 +169,19 @@ def main() -> None:
         print("\nBy vocabulary (code prefix) in your data:", by_vocabulary, sep="\n")
         print("\nMost frequent unmapped codes:", uncovered, sep="\n")
         print("\nVocabularies in the model:", model_vocabularies.head(30), sep="\n")
+
+        by_quantile, below, by_length, (top_unmapped, top_rows) = per_patient_summary(patients)
+        print(
+            "\nPer-patient coverage quantiles (fraction of each patient's measurements that map):",
+            by_quantile,
+            sep="\n",
+        )
+        print("\nPatients with low coverage:", below, sep="\n")
+        print("\nBy record length (patient quartiles by number of measurements, 1 = shortest):", by_length, sep="\n")
+        print(
+            f"\nThe 10% of patients with the most unmapped measurements hold {top_unmapped:.1%} of unmapped"
+            f" measurements and {top_rows:.1%} of all measurements"
+        )
 
 
 if __name__ == "__main__":
