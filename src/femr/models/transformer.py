@@ -15,6 +15,7 @@ from torch import nn
 from tqdm import tqdm
 
 import femr.models.config
+import femr.models.hawk  # noqa: F401, patches torch_hawk for GPUs older than sm_80
 import femr.models.processor
 import femr.models.rmsnorm
 import femr.models.tasks
@@ -461,6 +462,7 @@ def compute_features(
     tokens_per_batch: int = 1024,
     device: Optional[torch.device] = None,
     ontology: Optional[femr.ontology.Ontology] = None,
+    dtype: torch.dtype = torch.bfloat16,
 ) -> Dict[str, np.ndarray]:
     """ "Compute features for a set of labels given a dataset and a model.
 
@@ -472,6 +474,8 @@ def compute_features(
         tokens_per_batch: The maximum number of tokens per batch
         device: Which type of compute to use
         ontology: A FEMR ontology object, which is necessary for models that use a hierarchical tokenizer
+        dtype: The CUDA autocast dtype. GPUs older than sm_80 (e.g. T4) need torch.float16 or torch.float32,
+            where torch.float32 disables autocast
 
     Returns:
         A dictionary of numpy arrays, with three keys, "subject_ids", "feature_times" and "features"
@@ -504,7 +508,7 @@ def compute_features(
     all_representations = []
 
     with torch.no_grad():
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with torch.autocast(device_type="cuda", dtype=dtype, enabled=dtype != torch.float32):
             for batch in tqdm(loader):
                 if device:
                     batch = to_device(batch, device)
