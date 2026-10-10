@@ -22,6 +22,8 @@ dependencies = [
     "polars >= 0.20",
     "dill >= 0.3.7",
     "xformers",
+    # triton 2.1 (pulled in by torch 2.1.2) imports setuptools at runtime, which uv venvs don't include
+    "setuptools",
 ]
 requires-python=">3.9"
 dynamic = ["version"]
