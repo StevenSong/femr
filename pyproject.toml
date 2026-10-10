@@ -21,6 +21,7 @@ dependencies = [
     "datasets >= 2.15",
     "polars >= 0.20",
     "dill >= 0.3.7",
+    "xformers",
 ]
 requires-python=">3.9"
 dynamic = ["version"]
@@ -44,6 +45,30 @@ build = [
     "sphinx-rtd-theme >= 0.5.0",
     "sphinx-autoapi >= 1.5.1",
     "torchtyping == 0.1.4",
+]
+
+[dependency-groups]
+dev = [
+    "femr[build]",
+    "ipykernel",
+    "ipywidgets",
+    "pre-commit",
+]
+
+[tool.uv]
+# xformers has no macOS wheels, and torch 2.1.2 has no wheels past Python 3.11.
+environments = ["sys_platform == 'linux' and python_version < '3.12'"]
+# Reproduce the environment StanfordShahLab/clmbr-t-base was released with (see its model card).
+constraint-dependencies = [
+    "torch == 2.1.2",
+    # The xformers build for torch 2.1.2; xformers only loads its CUDA extensions with the torch it was built against.
+    "xformers == 0.0.23.post1",
+    "transformers == 4.35.2",
+    "datasets == 2.15.0",
+    # torch 2.1.2 was built against NumPy 1.x.
+    "numpy < 2",
+    # datasets 2.15 relies on pyarrow APIs that later releases removed.
+    "pyarrow < 15",
 ]
 
 [tool.isort]
