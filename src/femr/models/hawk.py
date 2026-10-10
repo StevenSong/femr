@@ -34,20 +34,45 @@ def conv1d_torch(x: torch.Tensor, w: torch.Tensor, s: torch.Tensor) -> torch.Ten
     return result.to(x.dtype)
 
 
-def linear_recurrence_torch(a: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+def _scan(a: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     """Computes h[t] = a[t] * h[t - 1] + x[t] along dim 0 with a log-depth (Hillis-Steele) scan."""
-    a_f = a.float()
-    h = x.float()
-
+    h = x
     n = h.shape[0]
     offset = 1
     while offset < n:
-        # a_f[t] is the product of a over the window that h[t] currently covers
-        h = torch.cat((h[:offset], torch.addcmul(h[offset:], a_f[offset:], h[:-offset])))
-        a_f = torch.cat((a_f[:offset], a_f[offset:] * a_f[:-offset]))
+        # a[t] is the product of the original a over the window that h[t] currently covers
+        h = torch.cat((h[:offset], torch.addcmul(h[offset:], a[offset:], h[:-offset])))
+        a = torch.cat((a[:offset], a[offset:] * a[:-offset]))
         offset *= 2
+    return h
 
-    return h.to(x.dtype)
+
+class LinearRecurrenceFunction(torch.autograd.Function):
+    # A custom backward so autograd doesn't save every intermediate of the scan, only a and the output
+
+    @staticmethod
+    def forward(ctx, a: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        o = _scan(a.float(), x.float())
+        ctx.save_for_backward(a, o)
+        ctx.x_dtype = x.dtype
+        return o.to(x.dtype)
+
+    @staticmethod
+    def backward(ctx, d_o: torch.Tensor):
+        a, o = ctx.saved_tensors
+        a_f = a.float()
+
+        # d_x[t] = d_o[t] + a[t + 1] * d_x[t + 1], which is the same recurrence run in reverse
+        a_next = torch.cat((a_f[1:], torch.zeros_like(a_f[:1])))
+        d_x = _scan(a_next.flip(0), d_o.float().flip(0)).flip(0)
+        d_a = torch.cat((torch.zeros_like(o[:1]), o[:-1])) * d_x
+
+        return d_a.to(a.dtype), d_x.to(ctx.x_dtype)
+
+
+def linear_recurrence_torch(a: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    """Computes h[t] = a[t] * h[t - 1] + x[t] along dim 0."""
+    return LinearRecurrenceFunction.apply(a, x)
 
 
 def conv1d(x: torch.Tensor, w: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
